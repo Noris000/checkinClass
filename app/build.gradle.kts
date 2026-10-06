@@ -68,12 +68,19 @@ dependencies {
     implementation("com.google.firebase:firebase-auth")
     implementation("com.google.firebase:firebase-firestore")
 
-    // For QR scanning later (you can enable when ready)
-    // implementation("com.google.mlkit:barcode-scanning:17.3.0")
-    // implementation("androidx.camera:camera-camera2:1.4.0")
-    // implementation("androidx.camera:camera-lifecycle:1.4.0")
-    // implementation("androidx.camera:camera-view:1.4.0")
+    // QR generation & scanning & Location & Guava
+    implementation("com.google.zxing:core:3.5.3")
+    implementation("com.google.android.gms:play-services-location:21.3.0")
+    implementation("com.google.mlkit:barcode-scanning:17.3.0")
+    implementation("androidx.camera:camera-camera2:1.4.0")
+    implementation("androidx.camera:camera-lifecycle:1.4.0")
+    implementation("androidx.camera:camera-view:1.4.0")
+    implementation("com.google.guava:guava:33.4.0-android")
 
     debugImplementation("androidx.compose.ui:ui-tooling")
     debugImplementation("androidx.compose.ui:ui-test-manifest")
+}
+
+tasks.register("unitTestClasses") {
+    dependsOn("testDebugUnitTest")
 }

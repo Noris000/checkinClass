@@ -20,6 +20,7 @@ import com.example.classcheck.navigation.Screen
 import com.example.classcheck.utils.getAuthErrorMessage
 import com.google.firebase.auth.FirebaseAuth
 import com.google.firebase.firestore.FirebaseFirestore
+import com.google.firebase.firestore.SetOptions
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.tasks.await
 
@@ -145,6 +146,28 @@ fun StudentLoginScreen(navController: NavController) {
                                 errorMessage = "Access denied: this account is not registered as a student."
                                 isLoading = false
                                 return@launch
+                            }
+
+                            // Ensure classStudents assignments exist
+                            val program = doc.getString("program") ?: ""
+                            val studentName = doc.getString("name") ?: "Student"
+                            val studentId = doc.getString("studentId") ?: ""
+                            if (program.isNotEmpty()) {
+                                val classesSnap = db.collection("classes")
+                                    .whereEqualTo("program", program)
+                                    .get()
+                                    .await()
+
+                                for (cDoc in classesSnap.documents) {
+                                    val cId = cDoc.id
+                                    val assignmentMap = hashMapOf(
+                                        "classId" to cId,
+                                        "studentUid" to uid,
+                                        "studentId" to studentId,
+                                        "studentName" to studentName
+                                    )
+                                    db.collection("classStudents").document("${cId}_$uid").set(assignmentMap, SetOptions.merge()).await()
+                                }
                             }
 
                             navController.navigate(Screen.StudentHome.route) {

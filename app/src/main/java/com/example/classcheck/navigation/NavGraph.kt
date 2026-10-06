@@ -2,8 +2,10 @@ package com.example.classcheck.navigation
 
 import androidx.compose.runtime.Composable
 import androidx.navigation.NavHostController
+import androidx.navigation.NavType
 import androidx.navigation.compose.NavHost
 import androidx.navigation.compose.composable
+import androidx.navigation.navArgument
 import com.example.classcheck.ui.screens.*
 
 sealed class Screen(val route: String) {
@@ -18,7 +20,9 @@ sealed class Screen(val route: String) {
     object AttendanceHistory : Screen("attendance_history")
     object Profile : Screen("profile")
     object TeacherHome : Screen("teacher_home")
-    object ActiveSession : Screen("active_session")
+    object ActiveSession : Screen("active_session/{sessionId}/{classId}") {
+        fun createRoute(sessionId: String, classId: String) = "active_session/$sessionId/$classId"
+    }
     object SessionHistory : Screen("session_history")
 }
 
@@ -61,8 +65,16 @@ fun NavGraph(navController: NavHostController) {
         composable(Screen.TeacherHome.route) {
             TeacherHomeScreen(navController)
         }
-        composable(Screen.ActiveSession.route) {
-            ActiveSessionScreen(navController)
+        composable(
+            route = "active_session/{sessionId}/{classId}",
+            arguments = listOf(
+                navArgument("sessionId") { type = NavType.StringType },
+                navArgument("classId") { type = NavType.StringType }
+            )
+        ) { backStackEntry ->
+            val sessionId = backStackEntry.arguments?.getString("sessionId") ?: ""
+            val classId = backStackEntry.arguments?.getString("classId") ?: ""
+            ActiveSessionScreen(navController, sessionId, classId)
         }
         composable(Screen.SessionHistory.route) {
             SessionHistoryScreen(navController)

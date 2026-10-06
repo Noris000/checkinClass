@@ -20,6 +20,7 @@ import androidx.compose.ui.unit.dp
 import androidx.navigation.NavController
 import com.example.classcheck.navigation.Screen
 import com.example.classcheck.utils.getAuthErrorMessage
+import com.google.firebase.Timestamp
 import com.google.firebase.auth.FirebaseAuth
 import com.google.firebase.firestore.FirebaseFirestore
 import kotlinx.coroutines.launch
@@ -209,10 +210,28 @@ fun StudentRegisterScreen(navController: NavController) {
                                 "email" to trimmedEmail,
                                 "role" to "student",
                                 "studentId" to trimmedStudentId,
-                                "program" to extractedProgram
+                                "program" to extractedProgram,
+                                "createdAt" to Timestamp.now()
                             )
 
                             db.collection("users").document(uid).set(userMap).await()
+
+                            // Automatically assign student to all classes matching their program
+                            val classesSnap = db.collection("classes")
+                                .whereEqualTo("program", extractedProgram)
+                                .get()
+                                .await()
+
+                            for (cDoc in classesSnap.documents) {
+                                val cId = cDoc.id
+                                val assignmentMap = hashMapOf(
+                                    "classId" to cId,
+                                    "studentUid" to uid,
+                                    "studentId" to trimmedStudentId,
+                                    "studentName" to trimmedName
+                                )
+                                db.collection("classStudents").document("${cId}_$uid").set(assignmentMap).await()
+                            }
 
                             navController.navigate(Screen.StudentHome.route) {
                                 popUpTo(Screen.Welcome.route) { inclusive = true }
