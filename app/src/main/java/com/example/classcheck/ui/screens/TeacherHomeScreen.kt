@@ -4,7 +4,6 @@ import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.material.icons.Icons
-import androidx.compose.material.icons.automirrored.filled.Logout
 import androidx.compose.material.icons.filled.History
 import androidx.compose.material.icons.filled.Person
 import androidx.compose.material.icons.filled.PlayArrow
@@ -82,14 +81,6 @@ fun TeacherHomeScreen(navController: NavController) {
                     }
                     IconButton(onClick = { navController.navigate(Screen.Profile.route) }) {
                         Icon(Icons.Default.Person, contentDescription = "Profile")
-                    }
-                    IconButton(onClick = {
-                        FirebaseAuth.getInstance().signOut()
-                        navController.navigate(Screen.Welcome.route) {
-                            popUpTo(0) { inclusive = true }
-                        }
-                    }) {
-                        Icon(Icons.AutoMirrored.Filled.Logout, contentDescription = "Log out")
                     }
                 }
             )

@@ -18,7 +18,10 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.navigation.NavController
 import com.google.firebase.auth.FirebaseAuth
+import com.google.firebase.firestore.DocumentSnapshot
 import com.google.firebase.firestore.FirebaseFirestore
+import com.google.firebase.firestore.Query
+import kotlinx.coroutines.launch
 import kotlinx.coroutines.tasks.await
 import java.text.SimpleDateFormat
 import java.util.*
@@ -46,28 +49,61 @@ data class SessionRecordUi(
 @Composable
 fun SessionHistoryScreen(navController: NavController) {
     var sessionsList by remember { mutableStateOf<List<SessionRecordUi>>(emptyList()) }
-    var isLoading by remember { mutableStateOf(true) }
+    var lastDocument by remember { mutableStateOf<DocumentSnapshot?>(null) }
+    var isInitialLoading by remember { mutableStateOf(true) }
+    var isPageLoading by remember { mutableStateOf(false) }
+    var hasMoreSessions by remember { mutableStateOf(true) }
     var errorMessage by remember { mutableStateOf<String?>(null) }
     var selectedSessionForDialog by remember { mutableStateOf<SessionRecordUi?>(null) }
 
+    val scope = rememberCoroutineScope()
     val dateFormat = remember { SimpleDateFormat("d MMMM yyyy · HH:mm", Locale.getDefault()) }
     val timeFormat = remember { SimpleDateFormat("HH:mm", Locale.getDefault()) }
 
-    LaunchedEffect(Unit) {
-        val user = FirebaseAuth.getInstance().currentUser
-        if (user != null) {
-            try {
-                val db = FirebaseFirestore.getInstance()
-                val sessionsSnapshot = db.collection("sessions")
-                    .whereEqualTo("teacherId", user.uid)
-                    .get()
-                    .await()
+    fun loadNextPage() {
+        if (isPageLoading || !hasMoreSessions) return
+        isPageLoading = true
+        errorMessage = null
 
-                val list = mutableListOf<SessionRecordUi>()
-                for (doc in sessionsSnapshot.documents) {
-                    val sessionId = doc.id
-                    val classId = doc.getString("classId") ?: continue
-                    val startTime = doc.getTimestamp("startTime")?.toDate() ?: Date()
+        scope.launch {
+            try {
+                val user = FirebaseAuth.getInstance().currentUser
+                if (user == null) {
+                    isPageLoading = false
+                    isInitialLoading = false
+                    return@launch
+                }
+
+                val db = FirebaseFirestore.getInstance()
+                var query = db.collection("sessions")
+                    .whereEqualTo("teacherId", user.uid)
+                    .orderBy("startTime", Query.Direction.DESCENDING)
+                    .limit(10)
+
+                if (lastDocument != null) {
+                    query = query.startAfter(lastDocument!!)
+                }
+
+                val snapshot = query.get().await()
+                val docs = snapshot.documents
+
+                if (docs.isEmpty()) {
+                    hasMoreSessions = false
+                    isPageLoading = false
+                    isInitialLoading = false
+                    return@launch
+                }
+
+                lastDocument = docs.last()
+                if (docs.size < 10) {
+                    hasMoreSessions = false
+                }
+
+                val pageItems = mutableListOf<SessionRecordUi>()
+                for (sDoc in docs) {
+                    val sessionId = sDoc.id
+                    val classId = sDoc.getString("classId") ?: continue
+                    val startTime = sDoc.getTimestamp("startTime")?.toDate() ?: Date()
 
                     // Get class information
                     val classDoc = db.collection("classes").document(classId).get().await()
@@ -115,7 +151,7 @@ fun SessionHistoryScreen(navController: NavController) {
                     val present = studentRows.count { it.isCheckedIn }
                     val total = studentRows.size
 
-                    list.add(
+                    pageItems.add(
                         SessionRecordUi(
                             sessionId = sessionId,
                             classId = classId,
@@ -128,12 +164,22 @@ fun SessionHistoryScreen(navController: NavController) {
                         )
                     )
                 }
-                sessionsList = list.sortedByDescending { it.date }
+
+                val existingIds = sessionsList.map { it.sessionId }.toSet()
+                val uniqueNewItems = pageItems.filter { it.sessionId !in existingIds }
+                sessionsList = sessionsList + uniqueNewItems
+
             } catch (e: Exception) {
-                errorMessage = "Failed to load session history: ${e.localizedMessage}"
+                errorMessage = "Failed to load sessions: ${e.localizedMessage}"
+            } finally {
+                isPageLoading = false
+                isInitialLoading = false
             }
         }
-        isLoading = false
+    }
+
+    LaunchedEffect(Unit) {
+        loadNextPage()
     }
 
     Scaffold(
@@ -148,7 +194,7 @@ fun SessionHistoryScreen(navController: NavController) {
             )
         }
     ) { padding ->
-        if (isLoading) {
+        if (isInitialLoading) {
             Box(
                 modifier = Modifier
                     .fillMaxSize()
@@ -166,9 +212,15 @@ fun SessionHistoryScreen(navController: NavController) {
                 verticalArrangement = Arrangement.spacedBy(12.dp),
                 contentPadding = PaddingValues(vertical = 16.dp)
             ) {
-                if (errorMessage != null) {
+                if (errorMessage != null && sessionsList.isEmpty()) {
                     item {
-                        Text(text = errorMessage ?: "", color = MaterialTheme.colorScheme.error)
+                        Column(horizontalAlignment = Alignment.CenterHorizontally, modifier = Modifier.fillMaxWidth()) {
+                            Text(text = errorMessage ?: "", color = MaterialTheme.colorScheme.error)
+                            Spacer(modifier = Modifier.height(8.dp))
+                            OutlinedButton(onClick = { loadNextPage() }) {
+                                Text("Retry")
+                            }
+                        }
                     }
                 } else if (sessionsList.isEmpty()) {
                     item {
@@ -232,6 +284,29 @@ fun SessionHistoryScreen(navController: NavController) {
                                         color = MaterialTheme.colorScheme.primary
                                     )
                                 }
+                            }
+                        }
+                    }
+
+                    // Pagination Footer Item
+                    item {
+                        if (isPageLoading) {
+                            Box(
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .padding(16.dp),
+                                contentAlignment = Alignment.Center
+                            ) {
+                                CircularProgressIndicator(modifier = Modifier.size(28.dp))
+                            }
+                        } else if (hasMoreSessions) {
+                            OutlinedButton(
+                                onClick = { loadNextPage() },
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .padding(vertical = 8.dp)
+                            ) {
+                                Text("Load 10 more")
                             }
                         }
                     }
