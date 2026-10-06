@@ -17,6 +17,7 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.navigation.NavController
+import com.google.firebase.Timestamp
 import com.google.firebase.auth.FirebaseAuth
 import com.google.firebase.firestore.DocumentSnapshot
 import com.google.firebase.firestore.FirebaseFirestore
@@ -42,6 +43,7 @@ data class SessionRecordUi(
     val room: String,
     val present: Int,
     val total: Int,
+    val isEnded: Boolean,
     val studentsList: List<PastSessionStudentRow>
 )
 
@@ -55,10 +57,16 @@ fun SessionHistoryScreen(navController: NavController) {
     var hasMoreSessions by remember { mutableStateOf(true) }
     var errorMessage by remember { mutableStateOf<String?>(null) }
     var selectedSessionForDialog by remember { mutableStateOf<SessionRecordUi?>(null) }
+    var isUpdatingAttendance by remember { mutableStateOf(false) }
 
     val scope = rememberCoroutineScope()
     val dateFormat = remember { SimpleDateFormat("d MMMM yyyy · HH:mm", Locale.getDefault()) }
     val timeFormat = remember { SimpleDateFormat("HH:mm", Locale.getDefault()) }
+
+    // Identify the most recently ended session ID across all loaded sessions
+    val latestEndedSessionId = remember(sessionsList) {
+        sessionsList.firstOrNull { it.isEnded }?.sessionId
+    }
 
     fun loadNextPage() {
         if (isPageLoading || !hasMoreSessions) return
@@ -100,10 +108,16 @@ fun SessionHistoryScreen(navController: NavController) {
                 }
 
                 val pageItems = mutableListOf<SessionRecordUi>()
+                val now = Date()
+
                 for (sDoc in docs) {
                     val sessionId = sDoc.id
                     val classId = sDoc.getString("classId") ?: continue
                     val startTime = sDoc.getTimestamp("startTime")?.toDate() ?: Date()
+                    val endTime = sDoc.getTimestamp("endTime")?.toDate()
+                    val isActive = sDoc.getBoolean("isActive") ?: false
+
+                    val isEnded = !isActive || (endTime != null && !endTime.after(now))
 
                     // Get class information
                     val classDoc = db.collection("classes").document(classId).get().await()
@@ -116,11 +130,11 @@ fun SessionHistoryScreen(navController: NavController) {
                         .get()
                         .await()
 
-                    val assignedStudents = studentsSnap.documents.map { sDoc ->
+                    val assignedStudents = studentsSnap.documents.map { stDoc ->
                         Triple(
-                            sDoc.getString("studentUid") ?: "",
-                            sDoc.getString("studentName") ?: "Student",
-                            sDoc.getString("studentId") ?: ""
+                            stDoc.getString("studentUid") ?: "",
+                            stDoc.getString("studentName") ?: "Student",
+                            stDoc.getString("studentId") ?: ""
                         )
                     }
 
@@ -160,6 +174,7 @@ fun SessionHistoryScreen(navController: NavController) {
                             room = room,
                             present = present,
                             total = total,
+                            isEnded = isEnded,
                             studentsList = studentRows
                         )
                     )
@@ -174,6 +189,61 @@ fun SessionHistoryScreen(navController: NavController) {
             } finally {
                 isPageLoading = false
                 isInitialLoading = false
+            }
+        }
+    }
+
+    fun toggleStudentAttendance(
+        session: SessionRecordUi,
+        student: PastSessionStudentRow
+    ) {
+        if (isUpdatingAttendance) return
+        isUpdatingAttendance = true
+
+        scope.launch {
+            try {
+                val db = FirebaseFirestore.getInstance()
+                val checkinDocRef = db.collection("checkins").document("${session.sessionId}_${student.studentUid}")
+
+                val newIsCheckedIn = !student.isCheckedIn
+                val now = Date()
+                val newCheckInTimeStr = if (newIsCheckedIn) timeFormat.format(now) else null
+
+                if (newIsCheckedIn) {
+                    val checkinMap = hashMapOf(
+                        "sessionId" to session.sessionId,
+                        "studentUid" to student.studentUid,
+                        "timestamp" to Timestamp.now(),
+                        "lat" to 0.0,
+                        "lng" to 0.0
+                    )
+                    checkinDocRef.set(checkinMap).await()
+                } else {
+                    checkinDocRef.delete().await()
+                }
+
+                val updatedStudentsList = session.studentsList.map {
+                    if (it.studentUid == student.studentUid) {
+                        it.copy(isCheckedIn = newIsCheckedIn, checkInTime = newCheckInTimeStr)
+                    } else {
+                        it
+                    }
+                }
+
+                val newPresentCount = updatedStudentsList.count { it.isCheckedIn }
+                val updatedSession = session.copy(
+                    present = newPresentCount,
+                    studentsList = updatedStudentsList
+                )
+
+                selectedSessionForDialog = updatedSession
+                sessionsList = sessionsList.map {
+                    if (it.sessionId == session.sessionId) updatedSession else it
+                }
+            } catch (e: Exception) {
+                errorMessage = "Failed to update attendance: ${e.localizedMessage}"
+            } finally {
+                isUpdatingAttendance = false
             }
         }
     }
@@ -317,14 +387,35 @@ fun SessionHistoryScreen(navController: NavController) {
         // Attendance Modal Dialog Window
         if (selectedSessionForDialog != null) {
             val session = selectedSessionForDialog!!
+            val isEditable = session.sessionId == latestEndedSessionId
+
             AlertDialog(
                 onDismissRequest = { selectedSessionForDialog = null },
                 title = {
-                    Text(
-                        text = "Attendance",
-                        style = MaterialTheme.typography.headlineSmall,
-                        fontWeight = FontWeight.Bold
-                    )
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.SpaceBetween,
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        Text(
+                            text = "Attendance",
+                            style = MaterialTheme.typography.headlineSmall,
+                            fontWeight = FontWeight.Bold
+                        )
+                        if (isEditable) {
+                            Surface(
+                                color = MaterialTheme.colorScheme.primaryContainer,
+                                shape = MaterialTheme.shapes.extraSmall
+                            ) {
+                                Text(
+                                    text = "Editable",
+                                    style = MaterialTheme.typography.labelSmall,
+                                    color = MaterialTheme.colorScheme.primary,
+                                    modifier = Modifier.padding(horizontal = 6.dp, vertical = 2.dp)
+                                )
+                            }
+                        }
+                    }
                 },
                 text = {
                     Column(
@@ -373,35 +464,72 @@ fun SessionHistoryScreen(navController: NavController) {
                         } else {
                             session.studentsList.forEach { student ->
                                 Column(modifier = Modifier.padding(vertical = 6.dp)) {
-                                    Row(verticalAlignment = Alignment.CenterVertically) {
-                                        if (student.isCheckedIn) {
-                                            Icon(
-                                                imageVector = Icons.Default.Check,
-                                                contentDescription = "Checked in",
-                                                tint = MaterialTheme.colorScheme.primary,
-                                                modifier = Modifier.size(20.dp)
-                                            )
-                                            Spacer(modifier = Modifier.width(8.dp))
-                                            Text(
-                                                text = student.studentName,
-                                                style = MaterialTheme.typography.bodyLarge,
-                                                fontWeight = FontWeight.SemiBold,
-                                                color = MaterialTheme.colorScheme.primary
-                                            )
-                                        } else {
-                                            Icon(
-                                                imageVector = Icons.Default.Close,
-                                                contentDescription = "Did not check in",
-                                                tint = MaterialTheme.colorScheme.error,
-                                                modifier = Modifier.size(20.dp)
-                                            )
-                                            Spacer(modifier = Modifier.width(8.dp))
-                                            Text(
-                                                text = student.studentName,
-                                                style = MaterialTheme.typography.bodyLarge,
-                                                fontWeight = FontWeight.SemiBold,
-                                                color = MaterialTheme.colorScheme.error
-                                            )
+                                    Row(
+                                        modifier = Modifier.fillMaxWidth(),
+                                        horizontalArrangement = Arrangement.SpaceBetween,
+                                        verticalAlignment = Alignment.CenterVertically
+                                    ) {
+                                        Row(
+                                            modifier = Modifier.weight(1f),
+                                            verticalAlignment = Alignment.CenterVertically
+                                        ) {
+                                            if (student.isCheckedIn) {
+                                                Icon(
+                                                    imageVector = Icons.Default.Check,
+                                                    contentDescription = "Checked in",
+                                                    tint = MaterialTheme.colorScheme.primary,
+                                                    modifier = Modifier.size(20.dp)
+                                                )
+                                                Spacer(modifier = Modifier.width(8.dp))
+                                                Text(
+                                                    text = student.studentName,
+                                                    style = MaterialTheme.typography.bodyLarge,
+                                                    fontWeight = FontWeight.SemiBold,
+                                                    color = MaterialTheme.colorScheme.primary
+                                                )
+                                            } else {
+                                                Icon(
+                                                    imageVector = Icons.Default.Close,
+                                                    contentDescription = "Did not check in",
+                                                    tint = MaterialTheme.colorScheme.error,
+                                                    modifier = Modifier.size(20.dp)
+                                                )
+                                                Spacer(modifier = Modifier.width(8.dp))
+                                                Text(
+                                                    text = student.studentName,
+                                                    style = MaterialTheme.typography.bodyLarge,
+                                                    fontWeight = FontWeight.SemiBold,
+                                                    color = MaterialTheme.colorScheme.error
+                                                )
+                                            }
+                                        }
+
+                                        // Editing control for latest ended session
+                                        if (isEditable) {
+                                            if (student.isCheckedIn) {
+                                                TextButton(
+                                                    onClick = { toggleStudentAttendance(session, student) },
+                                                    enabled = !isUpdatingAttendance
+                                                ) {
+                                                    Text(
+                                                        "Mark Absent",
+                                                        color = MaterialTheme.colorScheme.error,
+                                                        style = MaterialTheme.typography.labelMedium
+                                                    )
+                                                }
+                                            } else {
+                                                Button(
+                                                    onClick = { toggleStudentAttendance(session, student) },
+                                                    enabled = !isUpdatingAttendance,
+                                                    contentPadding = PaddingValues(horizontal = 8.dp, vertical = 4.dp),
+                                                    modifier = Modifier.height(32.dp)
+                                                ) {
+                                                    Text(
+                                                        "Mark Present",
+                                                        style = MaterialTheme.typography.labelSmall
+                                                    )
+                                                }
+                                            }
                                         }
                                     }
                                     Text(
