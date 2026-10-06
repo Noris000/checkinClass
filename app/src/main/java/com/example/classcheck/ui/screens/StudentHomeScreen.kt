@@ -19,6 +19,12 @@ import kotlinx.coroutines.tasks.await
 import java.text.SimpleDateFormat
 import java.util.*
 
+enum class CheckInStatus {
+    OPEN,
+    NOT_STARTED,
+    ENDED
+}
+
 data class ClassItem(
     val id: String = "",
     val name: String = "",
@@ -32,6 +38,7 @@ data class ClassItem(
 @Composable
 fun StudentHomeScreen(navController: NavController) {
     var classesList by remember { mutableStateOf<List<ClassItem>>(emptyList()) }
+    var sessionStatusMap by remember { mutableStateOf<Map<String, CheckInStatus>>(emptyMap()) }
     var isLoading by remember { mutableStateOf(true) }
     var studentProgram by remember { mutableStateOf("") }
     var errorMessage by remember { mutableStateOf<String?>(null) }
@@ -75,6 +82,48 @@ fun StudentHomeScreen(navController: NavController) {
         isLoading = false
     }
 
+    // Listen to real-time session changes for student's classes
+    DisposableEffect(classesList) {
+        if (classesList.isEmpty()) {
+            return@DisposableEffect onDispose {}
+        }
+
+        val db = FirebaseFirestore.getInstance()
+        val classIds = classesList.map { it.id }
+
+        val listener = db.collection("sessions")
+            .whereIn("classId", classIds)
+            .addSnapshotListener { snapshot, _ ->
+                if (snapshot != null) {
+                    val now = Date()
+                    val newMap = mutableMapOf<String, CheckInStatus>()
+                    val sessionsByClass = snapshot.documents.groupBy { it.getString("classId") ?: "" }
+
+                    for (classId in classIds) {
+                        val classSessions = sessionsByClass[classId] ?: emptyList()
+                        val activeSession = classSessions.find { doc ->
+                            val isActive = doc.getBoolean("isActive") ?: false
+                            val endTime = doc.getTimestamp("endTime")?.toDate()
+                            isActive && endTime != null && endTime.after(now)
+                        }
+
+                        if (activeSession != null) {
+                            newMap[classId] = CheckInStatus.OPEN
+                        } else if (classSessions.isNotEmpty()) {
+                            newMap[classId] = CheckInStatus.ENDED
+                        } else {
+                            newMap[classId] = CheckInStatus.NOT_STARTED
+                        }
+                    }
+                    sessionStatusMap = newMap
+                }
+            }
+
+        onDispose {
+            listener.remove()
+        }
+    }
+
     Scaffold(
         topBar = {
             TopAppBar(
@@ -87,13 +136,6 @@ fun StudentHomeScreen(navController: NavController) {
                         Icon(Icons.Default.Person, contentDescription = "Profile")
                     }
                 }
-            )
-        },
-        floatingActionButton = {
-            ExtendedFloatingActionButton(
-                onClick = { navController.navigate(Screen.CheckIn.route) },
-                icon = { Icon(Icons.Default.QrCodeScanner, contentDescription = null) },
-                text = { Text("Check In") }
             )
         }
     ) { padding ->
@@ -142,7 +184,14 @@ fun StudentHomeScreen(navController: NavController) {
                     }
                 } else {
                     items(classesList) { classItem ->
-                        ClassCard(classItem)
+                        val status = sessionStatusMap[classItem.id] ?: CheckInStatus.NOT_STARTED
+                        ClassCard(
+                            classItem = classItem,
+                            status = status,
+                            onCheckInClick = {
+                                navController.navigate(Screen.CheckIn.route)
+                            }
+                        )
                     }
                 }
             }
@@ -151,7 +200,11 @@ fun StudentHomeScreen(navController: NavController) {
 }
 
 @Composable
-fun ClassCard(classItem: ClassItem) {
+fun ClassCard(
+    classItem: ClassItem,
+    status: CheckInStatus,
+    onCheckInClick: () -> Unit
+) {
     Card(
         modifier = Modifier.fillMaxWidth(),
         colors = CardDefaults.cardColors(
@@ -163,12 +216,41 @@ fun ClassCard(classItem: ClassItem) {
                 .fillMaxWidth()
                 .padding(16.dp)
         ) {
-            Text(
-                text = classItem.name,
-                style = MaterialTheme.typography.titleMedium,
-                fontWeight = FontWeight.SemiBold
-            )
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.SpaceBetween,
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                Text(
+                    text = classItem.name,
+                    style = MaterialTheme.typography.titleMedium,
+                    fontWeight = FontWeight.SemiBold,
+                    modifier = Modifier.weight(1f)
+                )
+
+                // Status Badge
+                val (statusText, statusColor, containerColor) = when (status) {
+                    CheckInStatus.OPEN -> Triple("CHECK-IN OPEN", MaterialTheme.colorScheme.primary, MaterialTheme.colorScheme.primaryContainer)
+                    CheckInStatus.NOT_STARTED -> Triple("CHECK-IN NOT STARTED", MaterialTheme.colorScheme.outline, MaterialTheme.colorScheme.surfaceVariant)
+                    CheckInStatus.ENDED -> Triple("CHECK-IN ENDED", MaterialTheme.colorScheme.error, MaterialTheme.colorScheme.errorContainer)
+                }
+
+                Surface(
+                    color = containerColor,
+                    shape = MaterialTheme.shapes.extraSmall
+                ) {
+                    Text(
+                        text = statusText,
+                        style = MaterialTheme.typography.labelSmall,
+                        fontWeight = FontWeight.Bold,
+                        color = statusColor,
+                        modifier = Modifier.padding(horizontal = 8.dp, vertical = 4.dp)
+                    )
+                }
+            }
+
             Spacer(modifier = Modifier.height(8.dp))
+
             Row(verticalAlignment = Alignment.CenterVertically) {
                 Icon(
                     Icons.Default.Schedule,
@@ -183,7 +265,9 @@ fun ClassCard(classItem: ClassItem) {
                     color = MaterialTheme.colorScheme.onSurfaceVariant
                 )
             }
+
             Spacer(modifier = Modifier.height(4.dp))
+
             Row(verticalAlignment = Alignment.CenterVertically) {
                 Icon(
                     Icons.Default.MeetingRoom,
@@ -197,6 +281,34 @@ fun ClassCard(classItem: ClassItem) {
                     style = MaterialTheme.typography.bodyMedium,
                     color = MaterialTheme.colorScheme.onSurfaceVariant
                 )
+            }
+
+            Spacer(modifier = Modifier.height(12.dp))
+
+            // Check In Button per class entry
+            if (status == CheckInStatus.OPEN) {
+                Button(
+                    onClick = onCheckInClick,
+                    modifier = Modifier.fillMaxWidth()
+                ) {
+                    Icon(
+                        Icons.Default.QrCodeScanner,
+                        contentDescription = null,
+                        modifier = Modifier.size(18.dp)
+                    )
+                    Spacer(modifier = Modifier.width(8.dp))
+                    Text("Check In")
+                }
+            } else {
+                OutlinedButton(
+                    onClick = { },
+                    enabled = false,
+                    modifier = Modifier.fillMaxWidth()
+                ) {
+                    Text(
+                        text = if (status == CheckInStatus.NOT_STARTED) "Check In Not Started" else "Check In Ended"
+                    )
+                }
             }
         }
     }
