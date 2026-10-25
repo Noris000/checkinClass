@@ -21,6 +21,7 @@ import java.util.*
 
 enum class CheckInStatus {
     OPEN,
+    CHECKED_IN,
     NOT_STARTED,
     ENDED
 }
@@ -82,16 +83,31 @@ fun StudentHomeScreen(navController: NavController) {
         isLoading = false
     }
 
-    // Listen to real-time session changes for student's classes
+    // Listen to real-time session and check-in changes for student's classes
     DisposableEffect(classesList) {
         if (classesList.isEmpty()) {
             return@DisposableEffect onDispose {}
         }
 
+        val user = FirebaseAuth.getInstance().currentUser
+        if (user == null) return@DisposableEffect onDispose {}
+
         val db = FirebaseFirestore.getInstance()
         val classIds = classesList.map { it.id }
 
-        val listener = db.collection("sessions")
+        var checkedInSessionIds = setOf<String>()
+
+        val checkinsListener = db.collection("checkins")
+            .whereEqualTo("studentUid", user.uid)
+            .addSnapshotListener { checkinsSnap, _ ->
+                if (checkinsSnap != null) {
+                    checkedInSessionIds = checkinsSnap.documents.mapNotNull {
+                        it.getString("sessionId")
+                    }.toSet()
+                }
+            }
+
+        val sessionsListener = db.collection("sessions")
             .whereIn("classId", classIds)
             .addSnapshotListener { snapshot, _ ->
                 if (snapshot != null) {
@@ -108,7 +124,12 @@ fun StudentHomeScreen(navController: NavController) {
                         }
 
                         if (activeSession != null) {
-                            newMap[classId] = CheckInStatus.OPEN
+                            val activeSessionId = activeSession.id
+                            if (activeSessionId in checkedInSessionIds) {
+                                newMap[classId] = CheckInStatus.CHECKED_IN
+                            } else {
+                                newMap[classId] = CheckInStatus.OPEN
+                            }
                         } else if (classSessions.isNotEmpty()) {
                             newMap[classId] = CheckInStatus.ENDED
                         } else {
@@ -120,7 +141,8 @@ fun StudentHomeScreen(navController: NavController) {
             }
 
         onDispose {
-            listener.remove()
+            checkinsListener.remove()
+            sessionsListener.remove()
         }
     }
 
@@ -231,6 +253,7 @@ fun ClassCard(
                 // Status Badge
                 val (statusText, statusColor, containerColor) = when (status) {
                     CheckInStatus.OPEN -> Triple("CHECK-IN OPEN", MaterialTheme.colorScheme.primary, MaterialTheme.colorScheme.primaryContainer)
+                    CheckInStatus.CHECKED_IN -> Triple("CHECKED IN / PRESENT", MaterialTheme.colorScheme.primary, MaterialTheme.colorScheme.primaryContainer)
                     CheckInStatus.NOT_STARTED -> Triple("CHECK-IN NOT STARTED", MaterialTheme.colorScheme.outline, MaterialTheme.colorScheme.surfaceVariant)
                     CheckInStatus.ENDED -> Triple("CHECK-IN ENDED", MaterialTheme.colorScheme.error, MaterialTheme.colorScheme.errorContainer)
                 }
@@ -298,6 +321,20 @@ fun ClassCard(
                     )
                     Spacer(modifier = Modifier.width(8.dp))
                     Text("Check In")
+                }
+            } else if (status == CheckInStatus.CHECKED_IN) {
+                OutlinedButton(
+                    onClick = { },
+                    enabled = false,
+                    modifier = Modifier.fillMaxWidth()
+                ) {
+                    Icon(
+                        Icons.Default.CheckCircle,
+                        contentDescription = null,
+                        modifier = Modifier.size(18.dp)
+                    )
+                    Spacer(modifier = Modifier.width(8.dp))
+                    Text("Checked In")
                 }
             } else {
                 OutlinedButton(

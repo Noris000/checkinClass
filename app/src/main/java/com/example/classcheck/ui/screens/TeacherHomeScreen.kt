@@ -7,6 +7,7 @@ import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.History
 import androidx.compose.material.icons.filled.Person
 import androidx.compose.material.icons.filled.PlayArrow
+import androidx.compose.material.icons.filled.Visibility
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
@@ -37,11 +38,13 @@ data class TeacherClassModel(
 @Composable
 fun TeacherHomeScreen(navController: NavController) {
     var classesList by remember { mutableStateOf<List<TeacherClassModel>>(emptyList()) }
+    var activeSessionsMap by remember { mutableStateOf<Map<String, String>>(emptyMap()) } // classId -> sessionId
     var isLoading by remember { mutableStateOf(true) }
     var errorMessage by remember { mutableStateOf<String?>(null) }
     var startingClassId by remember { mutableStateOf<String?>(null) }
     val scope = rememberCoroutineScope()
 
+    // 1. Fetch teacher classes
     LaunchedEffect(Unit) {
         val user = FirebaseAuth.getInstance().currentUser
         if (user != null) {
@@ -69,6 +72,35 @@ fun TeacherHomeScreen(navController: NavController) {
             }
         }
         isLoading = false
+    }
+
+    // 2. Realtime listener for teacher's active sessions
+    DisposableEffect(Unit) {
+        val user = FirebaseAuth.getInstance().currentUser
+        if (user == null) return@DisposableEffect onDispose {}
+
+        val db = FirebaseFirestore.getInstance()
+        val listener = db.collection("sessions")
+            .whereEqualTo("teacherId", user.uid)
+            .whereEqualTo("isActive", true)
+            .addSnapshotListener { snapshot, _ ->
+                if (snapshot != null) {
+                    val now = Date()
+                    val newMap = mutableMapOf<String, String>()
+                    for (doc in snapshot.documents) {
+                        val cId = doc.getString("classId") ?: continue
+                        val endTime = doc.getTimestamp("endTime")?.toDate()
+                        if (endTime != null && endTime.after(now)) {
+                            newMap[cId] = doc.id
+                        }
+                    }
+                    activeSessionsMap = newMap
+                }
+            }
+
+        onDispose {
+            listener.remove()
+        }
     }
 
     Scaffold(
@@ -106,7 +138,7 @@ fun TeacherHomeScreen(navController: NavController) {
             ) {
                 item {
                     Text(
-                        text = "Start a check-in session",
+                        text = "Start or Resume Check-in Session",
                         style = MaterialTheme.typography.titleMedium,
                         color = MaterialTheme.colorScheme.primary
                     )
@@ -123,6 +155,8 @@ fun TeacherHomeScreen(navController: NavController) {
                     }
                 } else {
                     items(classesList) { classItem ->
+                        val activeSessionId = activeSessionsMap[classItem.id]
+
                         Card(
                             modifier = Modifier.fillMaxWidth()
                         ) {
@@ -143,46 +177,84 @@ fun TeacherHomeScreen(navController: NavController) {
                                     color = MaterialTheme.colorScheme.onSurfaceVariant
                                 )
                                 Spacer(modifier = Modifier.height(12.dp))
-                                Button(
-                                    onClick = {
-                                        scope.launch {
-                                            startingClassId = classItem.id
-                                            try {
-                                                val user = FirebaseAuth.getInstance().currentUser ?: return@launch
-                                                val db = FirebaseFirestore.getInstance()
-                                                val code = (100000..999999).random().toString()
-                                                val now = Timestamp.now()
-                                                val endTime = Timestamp(Date(System.currentTimeMillis() + 5 * 60 * 1000))
 
-                                                val sessionMap = hashMapOf(
-                                                    "classId" to classItem.id,
-                                                    "teacherId" to user.uid,
-                                                    "code" to code,
-                                                    "isActive" to true,
-                                                    "startTime" to now,
-                                                    "endTime" to endTime,
-                                                    "locationLat" to classItem.buildingLat,
-                                                    "locationLng" to classItem.buildingLng
-                                                )
-
-                                                val sessionRef = db.collection("sessions").add(sessionMap).await()
-                                                navController.navigate(Screen.ActiveSession.createRoute(sessionRef.id, classItem.id))
-                                            } catch (e: Exception) {
-                                                errorMessage = "Failed to start session: ${e.localizedMessage}"
-                                            } finally {
-                                                startingClassId = null
-                                            }
-                                        }
-                                    },
-                                    enabled = startingClassId != classItem.id,
-                                    modifier = Modifier.fillMaxWidth()
-                                ) {
-                                    if (startingClassId == classItem.id) {
-                                        CircularProgressIndicator(modifier = Modifier.size(24.dp), color = MaterialTheme.colorScheme.onPrimary)
-                                    } else {
-                                        Icon(Icons.Default.PlayArrow, contentDescription = null)
+                                if (activeSessionId != null) {
+                                    // Resume existing active session
+                                    Button(
+                                        onClick = {
+                                            navController.navigate(Screen.ActiveSession.createRoute(activeSessionId, classItem.id))
+                                        },
+                                        colors = ButtonDefaults.buttonColors(
+                                            containerColor = MaterialTheme.colorScheme.primary
+                                        ),
+                                        modifier = Modifier.fillMaxWidth()
+                                    ) {
+                                        Icon(Icons.Default.Visibility, contentDescription = null)
                                         Spacer(modifier = Modifier.width(8.dp))
-                                        Text("Start Check-in Session")
+                                        Text("Resume Active Session")
+                                    }
+                                } else {
+                                    // Start a new session
+                                    Button(
+                                        onClick = {
+                                            scope.launch {
+                                                startingClassId = classItem.id
+                                                try {
+                                                    val user = FirebaseAuth.getInstance().currentUser ?: return@launch
+                                                    val db = FirebaseFirestore.getInstance()
+
+                                                    // Double check if an active session was created concurrently
+                                                    val activeCheckSnap = db.collection("sessions")
+                                                        .whereEqualTo("classId", classItem.id)
+                                                        .whereEqualTo("teacherId", user.uid)
+                                                        .whereEqualTo("isActive", true)
+                                                        .get()
+                                                        .await()
+
+                                                    val now = Date()
+                                                    val existingSessionDoc = activeCheckSnap.documents.find { doc ->
+                                                        val endTime = doc.getTimestamp("endTime")?.toDate()
+                                                        endTime != null && endTime.after(now)
+                                                    }
+
+                                                    if (existingSessionDoc != null) {
+                                                        navController.navigate(Screen.ActiveSession.createRoute(existingSessionDoc.id, classItem.id))
+                                                    } else {
+                                                        val code = (100000..999999).random().toString()
+                                                        val nowTs = Timestamp.now()
+                                                        val endTimeTs = Timestamp(Date(System.currentTimeMillis() + 5 * 60 * 1000))
+
+                                                        val sessionMap = hashMapOf(
+                                                            "classId" to classItem.id,
+                                                            "teacherId" to user.uid,
+                                                            "code" to code,
+                                                            "isActive" to true,
+                                                            "startTime" to nowTs,
+                                                            "endTime" to endTimeTs,
+                                                            "locationLat" to classItem.buildingLat,
+                                                            "locationLng" to classItem.buildingLng
+                                                        )
+
+                                                        val sessionRef = db.collection("sessions").add(sessionMap).await()
+                                                        navController.navigate(Screen.ActiveSession.createRoute(sessionRef.id, classItem.id))
+                                                    }
+                                                } catch (e: Exception) {
+                                                    errorMessage = "Failed to start session: ${e.localizedMessage}"
+                                                } finally {
+                                                    startingClassId = null
+                                                }
+                                            }
+                                        },
+                                        enabled = startingClassId != classItem.id,
+                                        modifier = Modifier.fillMaxWidth()
+                                    ) {
+                                        if (startingClassId == classItem.id) {
+                                            CircularProgressIndicator(modifier = Modifier.size(24.dp), color = MaterialTheme.colorScheme.onPrimary)
+                                        } else {
+                                            Icon(Icons.Default.PlayArrow, contentDescription = null)
+                                            Spacer(modifier = Modifier.width(8.dp))
+                                            Text("Start Check-in Session")
+                                        }
                                     }
                                 }
                             }

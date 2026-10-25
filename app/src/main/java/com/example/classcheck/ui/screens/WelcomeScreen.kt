@@ -136,12 +136,6 @@ fun WelcomeScreen(navController: NavController) {
                 }
 
                 Spacer(modifier = Modifier.height(32.dp))
-
-                Text(
-                    text = "Prototype / Mockup version",
-                    style = MaterialTheme.typography.labelMedium,
-                    color = MaterialTheme.colorScheme.outline
-                )
             }
         }
     }

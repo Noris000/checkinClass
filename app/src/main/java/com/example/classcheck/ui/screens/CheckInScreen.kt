@@ -50,7 +50,7 @@ suspend fun getCameraProvider(context: Context): ProcessCameraProvider =
         ProcessCameraProvider.getInstance(context).get()
     }
 
-@OptIn(ExperimentalMaterial3Api::class)
+@OptIn(ExperimentalMaterial3Api::class, ExperimentalGetImage::class)
 @Composable
 fun CheckInScreen(navController: NavController) {
     var code by remember { mutableStateOf("") }

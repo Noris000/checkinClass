@@ -1,6 +1,7 @@
 package com.example.classcheck.ui.screens
 
 import android.graphics.Bitmap
+import androidx.activity.compose.BackHandler
 import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
@@ -50,9 +51,15 @@ fun ActiveSessionScreen(navController: NavController, sessionId: String, classId
     var totalAssigned by remember { mutableStateOf(0) }
     var isEnding by remember { mutableStateOf(false) }
     var isExpired by remember { mutableStateOf(false) }
+    var showLeaveDialog by remember { mutableStateOf(false) }
     var remainingSeconds by remember { mutableStateOf(300L) }
 
     val timeFormat = remember { SimpleDateFormat("HH:mm", Locale.getDefault()) }
+
+    // Intercept system Back button
+    BackHandler(enabled = !isExpired) {
+        showLeaveDialog = true
+    }
 
     // Session timer countdown & expiration handler
     LaunchedEffect(sessionId) {
@@ -68,7 +75,6 @@ fun ActiveSessionScreen(navController: NavController, sessionId: String, classId
                     if (diff <= 0) {
                         remainingSeconds = 0
                         isExpired = true
-                        // Automatically update Firestore session to inactive
                         try {
                             sessionDocRef.update("isActive", false).await()
                         } catch (_: Exception) {}
@@ -174,7 +180,13 @@ fun ActiveSessionScreen(navController: NavController, sessionId: String, classId
             TopAppBar(
                 title = { Text(if (isExpired) "Session Ended" else "Active Session") },
                 navigationIcon = {
-                    IconButton(onClick = { navController.popBackStack() }) {
+                    IconButton(onClick = {
+                        if (!isExpired) {
+                            showLeaveDialog = true
+                        } else {
+                            navController.popBackStack()
+                        }
+                    }) {
                         Icon(Icons.AutoMirrored.Filled.ArrowBack, contentDescription = "Back")
                     }
                 },
@@ -344,6 +356,42 @@ fun ActiveSessionScreen(navController: NavController, sessionId: String, classId
                     }
                 }
             }
+        }
+
+        // Leave Session Confirmation Dialog
+        if (showLeaveDialog) {
+            AlertDialog(
+                onDismissRequest = { showLeaveDialog = false },
+                title = { Text("Active Session in Progress") },
+                text = {
+                    Text("Leaving this screen will keep the check-in session active. Students can continue checking in until the timer expires. You can resume this session anytime from your class list.")
+                },
+                confirmButton = {
+                    Button(onClick = {
+                        showLeaveDialog = false
+                        navController.popBackStack()
+                    }) {
+                        Text("Leave Screen")
+                    }
+                },
+                dismissButton = {
+                    Row {
+                        OutlinedButton(onClick = {
+                            showLeaveDialog = false
+                            FirebaseFirestore.getInstance().collection("sessions")
+                                .document(sessionId)
+                                .update("isActive", false)
+                            navController.popBackStack()
+                        }) {
+                            Text("End Session", color = MaterialTheme.colorScheme.error)
+                        }
+                        Spacer(modifier = Modifier.width(8.dp))
+                        TextButton(onClick = { showLeaveDialog = false }) {
+                            Text("Cancel")
+                        }
+                    }
+                }
+            )
         }
     }
 }

@@ -15,7 +15,10 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.navigation.NavController
 import com.google.firebase.auth.FirebaseAuth
+import com.google.firebase.firestore.DocumentSnapshot
 import com.google.firebase.firestore.FirebaseFirestore
+import com.google.firebase.firestore.Query
+import kotlinx.coroutines.launch
 import kotlinx.coroutines.tasks.await
 import java.text.SimpleDateFormat
 import java.util.*
@@ -35,16 +38,30 @@ data class AttendanceRecordUi(
 @Composable
 fun AttendanceHistoryScreen(navController: NavController) {
     var records by remember { mutableStateOf<List<AttendanceRecordUi>>(emptyList()) }
-    var isLoading by remember { mutableStateOf(true) }
+    var lastDocument by remember { mutableStateOf<DocumentSnapshot?>(null) }
+    var isInitialLoading by remember { mutableStateOf(true) }
+    var isPageLoading by remember { mutableStateOf(false) }
+    var hasMoreLectures by remember { mutableStateOf(true) }
     var errorMessage by remember { mutableStateOf<String?>(null) }
 
+    val scope = rememberCoroutineScope()
     val dateFormat = remember { SimpleDateFormat("d MMM yyyy", Locale.getDefault()) }
     val timeFormat = remember { SimpleDateFormat("HH:mm", Locale.getDefault()) }
 
-    LaunchedEffect(Unit) {
-        val user = FirebaseAuth.getInstance().currentUser
-        if (user != null) {
+    fun loadNextPage() {
+        if (isPageLoading || !hasMoreLectures) return
+        isPageLoading = true
+        errorMessage = null
+
+        scope.launch {
             try {
+                val user = FirebaseAuth.getInstance().currentUser
+                if (user == null) {
+                    isPageLoading = false
+                    isInitialLoading = false
+                    return@launch
+                }
+
                 val db = FirebaseFirestore.getInstance()
 
                 // 1. Get student program
@@ -62,11 +79,30 @@ fun AttendanceHistoryScreen(navController: NavController) {
                     val classIds = classesMap.keys.toList()
 
                     if (classIds.isNotEmpty()) {
-                        // 3. Query sessions for these classes
-                        val sessionsSnap = db.collection("sessions")
+                        // 3. Query sessions page
+                        var sessionsQuery = db.collection("sessions")
                             .whereIn("classId", classIds)
-                            .get()
-                            .await()
+                            .orderBy("startTime", Query.Direction.DESCENDING)
+                            .limit(10)
+
+                        if (lastDocument != null) {
+                            sessionsQuery = sessionsQuery.startAfter(lastDocument!!)
+                        }
+
+                        val sessionsSnap = sessionsQuery.get().await()
+                        val sDocs = sessionsSnap.documents
+
+                        if (sDocs.isEmpty()) {
+                            hasMoreLectures = false
+                            isPageLoading = false
+                            isInitialLoading = false
+                            return@launch
+                        }
+
+                        lastDocument = sDocs.last()
+                        if (sDocs.size < 10) {
+                            hasMoreLectures = false
+                        }
 
                         // 4. Query student's check-ins
                         val checkinsSnap = db.collection("checkins")
@@ -79,9 +115,9 @@ fun AttendanceHistoryScreen(navController: NavController) {
                         }
 
                         val now = Date()
-                        val list = mutableListOf<AttendanceRecordUi>()
+                        val pageItems = mutableListOf<AttendanceRecordUi>()
 
-                        for (sDoc in sessionsSnap.documents) {
+                        for (sDoc in sDocs) {
                             val isActive = sDoc.getBoolean("isActive") ?: false
                             val endTime = sDoc.getTimestamp("endTime")?.toDate()
 
@@ -103,7 +139,7 @@ fun AttendanceHistoryScreen(navController: NavController) {
                                 timeFormat.format(it)
                             }
 
-                            list.add(
+                            pageItems.add(
                                 AttendanceRecordUi(
                                     sessionId = sessionId,
                                     className = className,
@@ -117,14 +153,26 @@ fun AttendanceHistoryScreen(navController: NavController) {
                             )
                         }
 
-                        records = list.sortedByDescending { it.startTime }
+                        val existingIds = records.map { it.sessionId }.toSet()
+                        val uniqueNewItems = pageItems.filter { it.sessionId !in existingIds }
+                        records = records + uniqueNewItems
+                    } else {
+                        hasMoreLectures = false
                     }
+                } else {
+                    hasMoreLectures = false
                 }
             } catch (e: Exception) {
                 errorMessage = "Failed to load attendance history: ${e.localizedMessage}"
+            } finally {
+                isPageLoading = false
+                isInitialLoading = false
             }
         }
-        isLoading = false
+    }
+
+    LaunchedEffect(Unit) {
+        loadNextPage()
     }
 
     Scaffold(
@@ -139,7 +187,7 @@ fun AttendanceHistoryScreen(navController: NavController) {
             )
         }
     ) { padding ->
-        if (isLoading) {
+        if (isInitialLoading) {
             Box(
                 modifier = Modifier
                     .fillMaxSize()
@@ -157,9 +205,15 @@ fun AttendanceHistoryScreen(navController: NavController) {
                 verticalArrangement = Arrangement.spacedBy(8.dp),
                 contentPadding = PaddingValues(vertical = 16.dp)
             ) {
-                if (errorMessage != null) {
+                if (errorMessage != null && records.isEmpty()) {
                     item {
-                        Text(text = errorMessage ?: "", color = MaterialTheme.colorScheme.error)
+                        Column(horizontalAlignment = Alignment.CenterHorizontally, modifier = Modifier.fillMaxWidth()) {
+                            Text(text = errorMessage ?: "", color = MaterialTheme.colorScheme.error)
+                            Spacer(modifier = Modifier.height(8.dp))
+                            OutlinedButton(onClick = { loadNextPage() }) {
+                                Text("Retry")
+                            }
+                        }
                     }
                 } else if (records.isEmpty()) {
                     item {
@@ -227,6 +281,29 @@ fun AttendanceHistoryScreen(navController: NavController) {
                                         modifier = Modifier.padding(horizontal = 8.dp, vertical = 4.dp)
                                     )
                                 }
+                            }
+                        }
+                    }
+
+                    // Pagination Footer
+                    item {
+                        if (isPageLoading) {
+                            Box(
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .padding(16.dp),
+                                contentAlignment = Alignment.Center
+                            ) {
+                                CircularProgressIndicator(modifier = Modifier.size(28.dp))
+                            }
+                        } else if (hasMoreLectures) {
+                            OutlinedButton(
+                                onClick = { loadNextPage() },
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .padding(vertical = 8.dp)
+                            ) {
+                                Text("Load 10 more")
                             }
                         }
                     }
